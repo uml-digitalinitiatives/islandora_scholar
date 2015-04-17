@@ -25,6 +25,32 @@ class DOIImporter extends IslandoraBatchImporter {
    * @see IslandoraBatchImporter::getForm()
    */
   public static function getForm(array &$form_state) {
+    // Get the list of valid content models.
+    $parent = islandora_object_load($form_state['storage']['parent_pid']);
+
+    $cm_options = array();
+    $ns_options = array(
+      NULL => t('Default namespace'),
+    );
+    if (isset($parent['COLLECTION_POLICY'])) {
+      $policy_stream = $parent['COLLECTION_POLICY'];
+      $policy = new CollectionPolicy($policy_stream->content);
+
+      $cm_options = array();
+      $ns_options = array(NULL => t('Default namespace'));
+      foreach ($policy->getContentModels() as $pid => $info) {
+        $cm_options[$pid] = array('title' => $info['name']);
+
+        $cm_namespace = $info['namespace'];
+        if (!empty($cm_namespace)) {
+          $cm_namespace = $info['namespace'];
+          $cm_namespace = explode(':', $info['namespace']);
+          $namespace = trim($cm_namespace[0]);
+          $ns_options[$namespace] = $namespace;
+        }
+      }
+    }
+
     return array(
       'fs' => array(
         '#type' => 'fieldset',
@@ -46,6 +72,17 @@ class DOIImporter extends IslandoraBatchImporter {
         'ids' => array(
           '#type' => 'value',
           '#value' => array(),
+        ),
+        'fs' => array(
+          '#type' => 'fieldset',
+          '#title' => t('Content Model'),
+          '#description' => t('The content model(s) to assign to the imported objects.'),
+          'content_model' => array(
+            '#type' => 'tableselect',
+            '#header' => array('title' => t('Name')),
+            '#multiple' => TRUE,
+            '#options' => $cm_options,
+          ),
         ),
         'submit' => array(
           '#type' => 'submit',
@@ -82,7 +119,12 @@ class DOIImporter extends IslandoraBatchImporter {
       $form_state['values']['ids'] = array_unique(preg_split("/[\s,]+/", $text));
     }
 
-    return !empty($form_state['values']['ids']);
+    $content_models = array_filter($form_state['values']['content_model']);
+    if (empty($content_models)) {
+      form_set_error('content_model', t('Need to select at least one content model.'));
+    }
+
+    return !empty($form_state['values']['ids']) && !empty($content_models);
   }
 
   /**
@@ -91,8 +133,18 @@ class DOIImporter extends IslandoraBatchImporter {
    * @see IslandoraBatchImporter::getBatchInfo()
    */
   public static function getBatchInfo(array &$form_state) {
+    // Grab the content models.
+    // Cast to an array, in case there are none?
+    $content_models = array_filter((array) $form_state['values']['content_model']);
+
     $ids = $form_state['values']['ids'];
-    return $ids;
+
+    $info = array(
+      'ids' => $ids,
+      'content_models' => $content_models,
+    );
+
+    return $info;
   }
 }
 
@@ -112,12 +164,31 @@ class DOIImportObject extends IslandoraImportObject {
   protected $mods;
 
   /**
+   * An AbstractObject for use in calling hooks... Should *NOT* be ingested.
+   *
+   * @var AbstractObject
+   */
+  protected $skeleton;
+
+  /**
+   * Constructor.
+   */
+  protected function __construct($source) {
+    parent::__construct($source);
+
+    $this->contentModel = (array) $this->source->content_model;
+
+    $this->skeleton = islandora_get_tuque_connection()->repository->constructObject('temp:pid');
+    $this->skeleton->models = $this->contentModel;
+  }
+
+  /**
    * Get an item from the source.
    *
    * @see IslandoraImportObject::getOne()
    */
-  public static function getOne(&$ids) {
-    $id = array_shift($ids);
+  public static function getOne(&$info) {
+    $id = array_shift($info['ids']);
 
     module_load_include('inc', 'islandora_doi', 'includes/utilities');
     $response = islandora_doi_perform_request($id);
@@ -133,7 +204,9 @@ class DOIImportObject extends IslandoraImportObject {
         return FALSE;
       }
       else {
-        return new self($response->data);
+        $record = $response->data;
+        $record->content_models = $info['content_models'];
+        return new static($record);
       }
     }
     else {
